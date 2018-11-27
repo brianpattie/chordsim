@@ -14,12 +14,17 @@ the circle.
 
 Nodes of the Chord DHT are simulated using threads.  Each contains the following:
 
-ID             # ID both uniquely identifies this node and specifies the last key in its portion of the identifier circle.
-successor      # The ID of the next node in the identifier space.
-predecessor    # The ID of the previous node in the identifier space.
-finger_table   # A table of finger objects that point to other nodes in the identifier space.
-queues         # Queues for messaging other nodes.  Stored in a dictionary.
-hash_table     # The hash table part of the distributed hash table.
+ID: ID both uniquely identifies this node and specifies the last key in its portion of the identifier circle.
+
+successor: The ID of the next node in the identifier space.
+
+predecessor : The ID of the previous node in the identifier space.
+
+finger_table: A table of finger objects that point to other nodes in the identifier space.
+
+queues: Queues for messaging other nodes.  Stored in a dictionary.
+
+hash_table: The hash table part of the distributed hash table.
 
 From here forward, n will be used to refer to both the node and the node's ID interchangably.
 When a node n receives a GET or SET request for it hashes the filename to determine the target ID, then checks if
