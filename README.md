@@ -29,12 +29,18 @@ hash_table: The hash table part of the distributed hash table.
 From here forward, n will be used to refer to both the node and the node's ID interchangably.
 When a node n receives a GET or SET request for it hashes the filename to determine the target ID, then checks if
 the ID falls within:
+
 Case 1) the keyspace of n
+
 Case 2) the keyspace of n.successor
+
 Case 3) the keyspace of some other node
 
+
 In case 1, n simply SETs or GETs the value stored at ID from it's local hash table.
+
 In case 2, n forwards the query to the message queue of it's immediate successor.
+
 In case 3, n searches for the closest predecessor to ID in its fingering table.  It then
 forwards the query to the message queue of that predecessor.
 
