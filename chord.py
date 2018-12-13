@@ -6,6 +6,12 @@ import time
 import random
 import math
 
+TEST = None
+# TEST = 0 # - THE "I HOPE I DIDN'T BREAK ANYTHING I CAN'T FIX TEST"
+# TEST = 1 # - PARTITION PASSING DURING NODE JOIN
+# TEST = 2 # - NODE LEAVING NETWORK
+TEST = 3 # - NODE LEAVING NETWORK + RESPONSIVE FINGER FIXING
+
 TIMEOUT = 2
 HASH_BITS = 8
 
@@ -14,9 +20,9 @@ random.seed(time.time())
 
 # Returns a the unsigned integer representation of 1 byte hash of the input string
 # Used BLAKE2 because it allows you to specify the size of the hash
-def hash(filename):
+def hash(file_name):
     h = blake2b(digest_size=1)
-    h.update(filename.encode())
+    h.update(file_name.encode())
     return struct.unpack('B', h.digest())[0]
 
 # Returns true if i is between lower bound lb and upper bound ub
@@ -28,63 +34,41 @@ def mod_between(i, lb, ub):
     return False
 
 # Struct for messages NEW
-# class Message():
-#
-#     def __init__(self, type, sender_id, file_id=None, file_data=None, node=None, finger_num=None):
-#         self.type           = type
-#         self.orig_sender_id = sender_id
-#         self.sender_id      = sender_id
-#         self.file_id        = file_id
-#         self.file_data      = file_data
-#         self.node           = node
-#         self.finger_num     = finger_num
-#
-#     # Returns a new message with the same values
-#     def copy(self):
-#         return Message(self.type, self.sender_id, file_id = self.file_id, file_data = self.file_data, node = self.node, finger_num = self.finger_num)
-#
-#     def print(self):
-#         print('type:')
-#         print(self.type)
-#         print('orig_sender_id:')
-#         print(self.orig_sender_id)
-#         print('sender_id:')
-#         print(self.sender_id)
-#         print('file_id')
-#         print(self.file_id)
-#         print('file_data:')
-#         print(self.file_data)
-#         print('node:')
-#         print(self.node)
-#         print('finger_num:')
-#         print(self.finger_num)
-
-# Struct for messages OLD
 class Message():
 
-    def __init__(self, type, sender_id, filename, data): #FIXME
+    def __init__(self, type, sender_id, mode=None, file_name=None, file_id=None, file_data=None, node=None, finger_num=None):
         self.type           = type
         self.orig_sender_id = sender_id
         self.sender_id      = sender_id
-        self.filename       = filename
-        self.data           = data
+        self.mode           = mode
+        self.file_name      = file_name
+        self.file_id        = file_id
+        self.file_data      = file_data
+        self.node           = node
+        self.finger_num     = finger_num
 
     # Returns a new message with the same values
     def copy(self):
-        return Message(self.type, self.sender_id, self.filename, self.data)#FIXME
+        return Message(self.type, self.orig_sender_id, mode=self.mode, file_name=self.file_name, file_id = self.file_id, file_data = self.file_data, node = self.node, finger_num = self.finger_num)
 
-    # Prints all fields of the message.  Used for debugging.
     def print(self):
-        print('type:')
+        print('---type:')
         print(self.type)
-        print('orig_sender_id:')
+        print('---mode:')
+        print(self.mode)
+        print('---orig_sender_id:')
         print(self.orig_sender_id)
-        print('sender_id:')
+        print('---sender_id:')
         print(self.sender_id)
-        print('filename')
-        print(self.filename)
-        print('data:')
-        print(self.data)
+        print('---file_id:')
+        print(self.file_id)
+        print('---file_data:')
+        print(self.file_data)
+        print('---node:')
+        print(self.node)
+        print('---finger_num:')
+        print(self.finger_num)
+
 
 # Struct for use in each node's finger table.
 # The finger table is used to find out which node has the requested resource in the DHT
@@ -134,34 +118,43 @@ class ChordNode(threading.Thread):
                 i += 1
             return
 
-        rand_queue = queue_keys[random.randint(0, len(queue_keys)) - 1]             # Select a random node.
-        self.queues[rand_queue].put(Message('FIND_PRED', self.id, None, self.id))   # Ask it to tell you your predecessor. #FIXME
-        msg = self.wait_for_message_type('FIND_PRED_REPLY')
-        self.predecessor = msg.data
+        rand_queue = queue_keys[random.randint(0, len(queue_keys)) - 1]                             # Select a random node.
+        self.queues[rand_queue].put(Message('FIND_PRED', self.id, mode='INIT', file_id=self.id))    # Ask it to tell you your predecessor. #FIXME
+        msg = self.wait_for_message_type('FIND_PRED_RESULT')
+        self.predecessor = msg.node
 
-        self.queues[self.predecessor].put(Message('FIND_SUCC', self.id, None, self.id))   # Ask your predecessor for your successor. #FIXME
-        msg = self.wait_for_message_type('FIND_SUCC_REPLY')                               # Its current successor is probably your successor
-        finger = Finger(self.id + 1, msg.data)
-        self.finger_table.append(finger)                                                  # Store your seccessor in your first (and closest) finger.
+        self.queues[self.predecessor].put(Message('FIND_SUCC', self.id, mode='INIT', file_id=self.id))   # Ask your predecessor for your successor. #FIXME
+        msg = self.wait_for_message_type('FIND_SUCC_RESULT')                                             # Its current successor is probably your successor
+        self.finger_table.append(Finger(self.id + 1, msg.node))                                          # Store your seccessor in your first (and closest) finger.
 
         i = 1
-        while i < HASH_BITS:                                # Ask your successor for all the rest of your fingers
+        while i < HASH_BITS:                                # Only the successor needs to be set for the node to function.  Set all fingers to the successor, and do the updates live.
             start = (self.id + 2**i) % 2**HASH_BITS         # <start> is an ID some distance away
-            succ = self.find_successor(start)               # <succ> is the successor of <start>
+            succ = self.finger_table[0].node                     # <succ> is the successor of <start>
             Finger(start, succ)
             self.finger_table.append(Finger(start, succ))
             i += 1
 
+        self.update_required = True
+
         self.stabalize()    # Your neigbours should point at you.  Tell them you exist.
 
-        self.queues[self.finger_table[0].node].put(Message('DATA_REQUEST', self.id, None, None)) # Ask your successor for your share of it's partition #FIXME
+        time.sleep(0.1)
 
+        self.queues[self.finger_table[0].node].put(Message('DATA_REQUEST', self.id)) # Ask your successor for your share of it's partition
+
+        time.sleep(0.1)
 
     def run(self):
 
         self.join_network();    # Join the network by initializing your predecessor and finger values.  Also tell the neighbouring nodes to point at you.
 
+        print('Node: ' + str(self.id) + ' has joined the network')
+
         while running:          # Main loop
+
+            if self.update_required:
+                self.ask_for_fingers()
 
             if len(self.msg_buf) > 0:
                 msg = self.msg_buf.pop(0)                               # Read any messages you buffered while you were waiting for a specific message.
@@ -173,17 +166,36 @@ class ChordNode(threading.Thread):
 
             # print('Node ' + str(self.id) + ' received message type ' + str(msg.type) + ' from ' + str(msg.sender_id))
             # msg.print()
-            if msg.type == 'GET':                   # GET: If you have the value they are looking for, return it.  Otherwise pass it along.
+            # print('Node ' + str(self.id) + ' received message type ' + str(msg.type) + ' mode ' + str(msg.mode) + ' from ' + str(msg.sender_id))
+
+            if msg.type == 'GET_REQUEST':                   # GET_REQUEST: If you have the value they are looking for, return it.  Otherwise pass it along.
                 self.get(msg)
 
-            elif msg.type == 'SET':                 # SET: If the key falls in your partition, set it to your local hash table.  Otherwise pass it along.
+            elif msg.type == 'SET_REQUEST':                 # SET_REQUEST: If the key falls in your partition, set it to your local hash table.  Otherwise pass it along.
                 self.set(msg)
+
+            elif msg.type == 'SET_RESULT':
+                self.set_success(msg)
+
+            elif msg.type == 'FINGER_RESULT':
+                self.update_finger(msg)
 
             elif msg.type == 'FIND_PRED':           # FIND_PRED: A node is looking for a predecessor to some ID.  If it's you, reply with a message.  Otherwise pass it along.
                 self.remote_find_predecessor(msg)
 
+            elif msg.type == 'FIND_PRED_RESULT':    # This should ask for a successor
+                self.find_successor(msg)
+
             elif msg.type == 'FIND_SUCC':           # FIND_SUCC: A node is looking for a successor to some ID.  If it's you, reply with a message.  Otherwise pass it along.
                 self.remote_find_successor(msg)
+
+            elif msg.type == 'FIND_SUCC_RESULT':
+                if msg.mode == 'GET':
+                    self.forward_get(msg)
+                elif msg.mode == 'SET':
+                    self.forward_set(msg)
+                elif msg.mode == 'FINGER':
+                    self.update_finger(msg)
 
             elif msg.type == 'SUCC_STABALIZE':      # SUCC_STABALIZE: A new node has joined the network and it thinks it's your predecessor.  Check the ID it sent you and update accordingly.
                 self.succ_stabalize(msg)
@@ -210,20 +222,10 @@ class ChordNode(threading.Thread):
                 self.insert_data(msg)
 
             elif msg.type == 'FIX_FINGERS':
-                self.fix_all_fingers()
+                self.ask_for_fingers()
 
             elif msg.type == 'LEAVE_NETWORK':
                 self.leave_network()
-
-            elif msg.type == 'PREDECESSOR_LEAVING':
-                self.predecessor = msg.data
-
-            elif msg.type == 'SUCCESSOR_LEAVING':
-                self.finger_table[0].node = msg.data
-
-
-            if self.update_required:
-                self.fix_all_fingers()
 
             msg = None
 
@@ -234,67 +236,90 @@ class ChordNode(threading.Thread):
     # Retreives a file from the DHT (which means printing it to screen for now)
     def get(self, msg):
 
-        id = hash(msg.filename)
+        id = hash(msg.file_name)
         if mod_between(id, self.predecessor + 1, self.id):
-            self.queues[msg.orig_sender_id].put(Message('GET_REPLY', self.id, msg.filename, self.hash_table[id])) #FIXME
-            print('Node ' + str(self.id) + ' performed GET on ' + str(msg.filename) + ' (Hashes to ' + str(id) + ') retrieving value: ' + str(self.hash_table[id]))
+            print('Node ' + str(self.id) + ' performed GET on ' + str(msg.file_name) + ' (Hashes to ' + str(id) + ') retrieving value: ' + str(self.hash_table[id]))
         else:
-            s = self.find_successor(id)
-            fwd_msg = msg.copy()
-            fwd_msg.sender_id = self.id
-            self.queues[s].put(fwd_msg)
+            new_msg = Message('FIND_PRED', self.id, mode='GET', file_name=msg.file_name, file_id=id)
+            self.queues[self.closest_preceding_finger(id)].put(new_msg)
+
+    def forward_get(self, msg):
+        sender_id = msg.sender_id # Save the message's sender
+        new_msg = msg.copy()
+        new_msg.type = 'GET_REQUEST'
+        new_msg.sender_id = self.id
+        self.queues[msg.node].put(new_msg) # Send to the node that sent me the message
 
 
-    # Writes data to the DHT under hash(filename)
+    # Writes data to the DHT under hash(file_name)
     def set(self, msg):
 
-        id = hash(msg.filename)
+        id = hash(msg.file_name)
         if mod_between(id, self.predecessor + 1, self.id):
-            self.hash_table[id] = msg.data
-            self.queues[msg.orig_sender_id].put(Message('SET_REPLY', self.id, msg.filename, self.hash_table[id])) #FIXME
-            print('Node ' + str(self.id) + ' performed SET on ' + str(msg.filename) + ' (Hashes to ' + str(id) + ') setting value: ' + str(self.hash_table[id]))
+            self.hash_table[id] = msg.file_data
+            # print('ID ' + str(id) + ' found to be between ' + str(self.predecessor + 1) + ' and ' + str(self.id))
+            print('Node ' + str(self.id) + ' performed SET on ' + str(msg.file_name) + ' (Hashes to ' + str(id) + ') setting value: ' + str(self.hash_table[id]))
         else:
-            s = self.find_successor(id)
-            fwd_msg = msg.copy()
-            fwd_msg.sender_id = self.id
-            self.queues[s].put(fwd_msg)
+            new_msg = Message('FIND_PRED', self.id, mode='SET', file_name=msg.file_name, file_id=id, file_data=msg.file_data)
+            self.queues[self.closest_preceding_finger(id)].put(new_msg)
 
+    def forward_set(self, msg):
+        sender_id = msg.sender_id # Save the message's sender
+        new_msg = msg.copy()
+        new_msg.type = 'SET_REQUEST'
+        new_msg.sender_id = self.id
+        self.queues[msg.node].put(new_msg) # Send to the node that sent me the message
 
     # Find the successor by asking the predecessor who their successor is
-    def find_successor(self, id):
-        if mod_between(id, self.predecessor + 1, self.id):              # If this node is <ID>'s successor...
-            return self.id                                              # Return this node's ID
-        n = self.find_predecessor(id)                                   # Else some other node is the successor.  Start by finding the predecessor.
-        if n == self.id:                                                # If this node is the predecessor, then this node's successor is <ID>'s successor
-            return self.finger_table[0].node                            # Return this node's ID.
-        self.queues[n].put(Message('FIND_SUCC', self.id, None, id))     # Else some other node is the predecessor.  Ask that node for it's successor    #FIXME
-        msg = self.wait_for_message_type('FIND_SUCC_REPLY')             # Wait for the reply
-        return msg.data                                                 # Return the ID in the message sent by <ID>'s successor.
+    # def find_successor(self, id):
+    #     if mod_between(id, self.predecessor + 1, self.id):              # If this node is <ID>'s successor...
+    #         return self.id                                              # Return this node's ID
+    #     n = self.find_predecessor(id)                                   # Else some other node is the successor.  Start by finding the predecessor.
+    #     if n == self.id:                                                # If this node is the predecessor, then this node's successor is <ID>'s successor
+    #         return self.finger_table[0].node                            # Return this node's ID.
+    #     self.queues[n].put(Message('FIND_SUCC', self.id, None, id))     # Else some other node is the predecessor.  Ask that node for it's successor
+    #     msg = self.wait_for_message_type('FIND_SUCC_REPLY')             # Wait for the reply
+    #     return msg.data                                                 # Return the ID in the message sent by <ID>'s successor.
 
+
+    # def remote_find_successor(self, msg):
+    #     self.queues[msg.orig_sender_id].put(Message('FIND_SUCC_REPLY', self.id, None, self.finger_table[0].node))
+
+    def find_successor(self, msg):
+        sender_id = msg.sender_id
+        new_msg = msg.copy()
+        new_msg.sender_id = self.id
+        new_msg.type = 'FIND_SUCC'
+        self.queues[sender_id].put(new_msg)
 
     def remote_find_successor(self, msg):
-        self.queues[msg.orig_sender_id].put(Message('FIND_SUCC_REPLY', self.id, None, self.finger_table[0].node)) #FIXME
+        new_msg = msg.copy()
+        new_msg.sender_id = self.id
+        new_msg.type = 'FIND_SUCC_RESULT'
+        new_msg.node = self.finger_table[0].node
+        self.queues[msg.orig_sender_id].put(new_msg)
 
 
-    def find_predecessor(self, id):
-        if mod_between(id, self.id + 1, self.finger_table[0].node):     # If this node is <ID>'s predecessor...
-            return self.id                                              # return this node's ID
-        n = self.closest_preceding_finger(id)                           # Else some other node is the predecessor, forward the request to closest preceeding finger
-        self.queues[n].put(Message('FIND_PRED', self.id, None, id))     # Send the message          #FIXME
-        msg = self.wait_for_message_type('FIND_PRED_REPLY')             # Wait for the reply
-        return msg.data                                                 # Return the ID in the message sent by <ID>'s predecessor.
+    # def find_predecessor(self, id):
+    #     if mod_between(id, self.id + 1, self.finger_table[0].node):     # If this node is <ID>'s predecessor...
+    #         return self.id                                              # return this node's ID
+    #     n = self.closest_preceding_finger(id)                           # Else some other node is the predecessor, forward the request to closest preceeding finger
+    #     self.queues[n].put(Message('FIND_PRED', self.id, None, id))     # Send the message
+    #     msg = self.wait_for_message_type('FIND_PRED_REPLY')             # Wait for the reply
+    #     return msg.data                                                 # Return the ID in the message sent by <ID>'s predecessor.
 
 
     def remote_find_predecessor(self, msg):
+        new_msg = msg.copy()
+        new_msg.sender_id = self.id
         # If this node is the predecessor
-        if mod_between(msg.data, self.id + 1, self.finger_table[0].node):
-            self.queues[msg.orig_sender_id].put(Message('FIND_PRED_REPLY', self.id, None, self.id))         #FIXME
+        if mod_between(msg.file_id, self.id + 1, self.finger_table[0].node):
+            new_msg.type = 'FIND_PRED_RESULT'
+            new_msg.node = self.id
+            self.queues[msg.orig_sender_id].put(new_msg)
         # Some other node is the successor, pass request to closest preceeding node
         else:
-            n = self.closest_preceding_finger(msg.data)
-            fwd_msg = msg.copy()
-            fwd_msg.sender = self.id
-            self.queues[n].put(fwd_msg)
+            self.queues[self.closest_preceding_finger(msg.file_id)].put(new_msg)
 
 
     # Identifies the node on the fingering table that is closest to the target point on the identifier circle without going past it.
@@ -304,7 +329,6 @@ class ChordNode(threading.Thread):
         for f in reversed(self.finger_table):
             if mod_between(f.node, self.id + 1, id) and self.node_exists(f.node):
                 return f.node
-        # print('I am the closest preceeding finger')
         return self.id
 
 
@@ -319,27 +343,27 @@ class ChordNode(threading.Thread):
 
     def stabalize(self):
         if self.id != self.finger_table[0].node:
-            self.queues[self.finger_table[0].node].put(Message('SUCC_STABALIZE', self.id, None, self.id))      #FIXME
+            self.queues[self.finger_table[0].node].put(Message('SUCC_STABALIZE', self.id, node=self.id))
         if self.id != self.predecessor:
-            self.queues[self.predecessor].put(Message('PRED_STABALIZE', self.id, None, self.id))                  #FIXME
+            self.queues[self.predecessor].put(Message('PRED_STABALIZE', self.id, node=self.id))
 
     def succ_stabalize(self, msg):
-        if self.id == self.predecessor or mod_between(msg.data, self.predecessor, self.id):
-            self.predecessor = msg.data
+        if self.id == self.predecessor or mod_between(msg.node, self.predecessor, self.id):
+            self.predecessor = msg.node
         else:
-            self.queues[msg.orig_sender_id].put(Message('SET_SUCCESSOR', self.id, None, self.predecessor))          #FIXME
+            self.queues[msg.orig_sender_id].put(Message('SET_SUCCESSOR', self.id, node=self.predecessor))
 
     def set_successor(self, msg):
-        self.finger_table[0].node = msg.data
+        self.finger_table[0].node = msg.node
 
     def pred_stabalize(self, msg):
-        if self.id == self.finger_table[0].node or mod_between(msg.data, self.id, self.finger_table[0].node):
-            self.finger_table[0].node = msg.data
+        if self.id == self.finger_table[0].node or mod_between(msg.node, self.id, self.finger_table[0].node):
+            self.finger_table[0].node = msg.node
         else:
-            self.queues[msg.orig_sender_id].put(Message('SET_PREDECESSOR', self.id, None, self.finger_table[0].node))        #FIXME
+            self.queues[msg.orig_sender_id].put(Message('SET_PREDECESSOR', self.id, node=self.finger_table[0].node))
 
     def set_predecessor(self, msg):
-        self.predecessor = msg.data
+        self.predecessor = msg.node
 
 
     def report(self):
@@ -354,11 +378,21 @@ class ChordNode(threading.Thread):
         for id in list(self.hash_table.keys()):
             print(str(id) + '\t= ' + str(self.hash_table[id]))
 
-    def fix_all_fingers(self):
-        print('Node ' + str(self.id) + ' fixing fingers')
-        for i in range(1, HASH_BITS):
-            x = self.find_successor(self.finger_table[i].start)
-            self.finger_table[i].node = x
+    def update_finger(self, msg):
+        if TEST == 3:
+            print('Node: ' + str(self.id) + ' updating finger ' + str(msg.finger_num) + ' (start = ' + str(msg.file_id) + ') to point at node: ' + str(msg.node))
+        self.finger_table[msg.finger_num].node = msg.node
+
+    def ask_for_fingers(self):
+        if TEST == 3:
+            print('Node ' + str(self.id) + ' is asking for finger updates')
+        for i in range(1, len(self.finger_table)):
+        # for i in range(1, 3):
+            if mod_between(self.finger_table[i].start, self.id, self.finger_table[0].node):
+                self.finger_table[i].node = self.finger_table[0].node
+            else:
+                # print('Node ' + str(self.id) + ' asking for finger ' + str(i) + ' (start =' + str(self.finger_table[i].start) + ')')
+                self.queues[self.finger_table[0].node].put(Message('FIND_PRED', self.id, mode='FINGER', finger_num=i, file_id=self.finger_table[i].start))
         self.update_required = False
 
     # Send any data that should belong to your predecessor.  Called when a new predecessor requests it the data.
@@ -366,7 +400,7 @@ class ChordNode(threading.Thread):
         for id in list(self.hash_table.keys()):
             if not mod_between(id, self.predecessor + 1, self.id):
                 # print('Node ' + str(self.id) + ' sending hash ' + str(id) + ' with data ' + str(self.hash_table[id]) + ' to Node ' + str(msg.orig_sender_id))
-                self.queues[msg.orig_sender_id].put(Message('DATA_TRANSFER', self.id, id, self.hash_table[id]))           #FIXME
+                self.queues[msg.orig_sender_id].put(Message('DATA_TRANSFER', self.id, file_id=id, file_data=self.hash_table[id]))
                 self.hash_table.pop(id, None)
 
     # Send all data to your successor before you leave the network.  Called as part of leave_network()
@@ -374,17 +408,17 @@ class ChordNode(threading.Thread):
         for id in list(self.hash_table.keys()):
             print('Node ' + str(self.id) + ' giving away ' + str(id) + ' before I die.')
             # print('Node ' + str(self.id) + ' sending hash ' + str(id) + ' with data ' + str(self.hash_table[id]) + ' to Node ' + str(msg.orig_sender_id))
-            self.queues[self.finger_table[0].node].put(Message('DATA_TRANSFER', self.id, id, self.hash_table[id]))         #FIXME
+            self.queues[self.finger_table[0].node].put(Message('DATA_TRANSFER', self.id, file_id=id, file_data=self.hash_table[id]))
             self.hash_table.pop(id, None)
 
     def insert_data(self, msg):
-        print('Node ' + str(self.id) + ' receiving ' + str(msg.filename) + ':' + str(msg.data))
-        self.hash_table[msg.filename] = msg.data
+        print('Node ' + str(self.id) + ' receiving ' + str(msg.file_id) + ':' + str(msg.file_data))
+        self.hash_table[msg.file_id] = msg.file_data
 
     def wait_for_message_type(self, type):
         msg = self.queues[self.id].get()
         while msg.type != type:
-            print('Node ' + str(self.id) + ' adding message:')
+            # print('Node ' + str(self.id) + ' adding message to buffer: TYPE: ' + str(msg.type) + ' MODE: ' + str(msg.mode) + ' from ' + str(msg.sender_id) + ' ' + str(msg.orig_sender_id))
             # msg.print()
             self.msg_buf.append(msg)
         return msg
@@ -392,8 +426,8 @@ class ChordNode(threading.Thread):
     def leave_network(self):
         # Pass all your info to your successor
         self.relinquish_partition_data()
-        self.queues[self.finger_table[0].node].put(Message('PREDECESSOR_LEAVING', self.id, None, self.predecessor))        #FIXME
-        self.queues[self.predecessor].put(Message('SUCCESSOR_LEAVING', self.id, None, self.predecessor))                 #FIXME
+        self.queues[self.finger_table[0].node].put(Message('SET_PREDECESSOR', self.id, node=self.predecessor))
+        self.queues[self.predecessor].put(Message('SET_SUCCESSOR', self.id, node=self.finger_table[0].node))
         del self.queues[self.id]
         print('Node ' + str(self.id) + ' leaving network and exiting')
         exit()
@@ -407,225 +441,323 @@ class ChordNode(threading.Thread):
 queues = {}
 queues['root'] = queue.Queue()
 
-# TEST 1: PARTITION PASSING DURING NODE JOIN---
-# nodes = []
-# nodes.append(ChordNode(queues))
-# nodes[0].start()
-#
-# time.sleep(0.25)
-#
-# queues[nodes[0].id].put(Message('SET', 'root', 'Chinchilla', 'Chinchilla'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Artichoke', 'Artichoke'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Mozzerella', 'Mozzerella'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Spinnach', 'Spinnach'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Alfredo', 'Alfredo'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Komquat', 'Komquat'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Rosemary', 'Rosemary'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Shrimp', 'Shrimp'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Halibut', 'Halibut'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Corn', 'Corn'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Yams', 'Yams'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Horseraddish', 'Horseraddish'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Garlic', 'Garlic'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Cauliflower', 'Cauliflower'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Pasta', 'Pasta'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Mushroom', 'Mushroom'))
-# time.sleep(0.25)
-#
-#
-# # Add New Nodes now that there is data in the first node
-# new_nodes = []
-# for i in range(0,5):
-#     new_nodes.append(ChordNode(queues))
-#
-# for n in new_nodes:
-#     n.start()
-#     time.sleep(0.25)
-#
-# print('FINAL VALUES')
-#
-# nodes[0].report()
-# for n in new_nodes:
-#     n.report()
-#     time.sleep(0.25)
+# TEST 0: THE "I HOPE I DIDN'T BREAK ANYTHING I CAN'T FIX TEST"---------
+if TEST == 0:
+    nodes = []
+    nodes.append(ChordNode(queues))
+    nodes[0].start()
 
-# queues[nodes[0].id].put(Message('GET', 'root', 'Chinchilla', 'Chinchilla'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Artichoke', 'Artichoke'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Mozzerella', 'Mozzerella'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Spinnach', 'Spinnach'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Alfredo', 'Alfredo'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Komquat', 'Komquat'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Rosemary', 'Rosemary'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Shrimp', 'Shrimp'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Halibut', 'Halibut'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Corn', 'Corn'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Yams', 'Yams'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Horseraddish', 'Horseraddish'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Garlic', 'Garlic'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Cauliflower', 'Cauliflower'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Pasta', 'Pasta'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('GET', 'root', 'Mushroom', 'Mushroom'))
-# time.sleep(0.25)
+    for n in nodes:
+        n.report()
+        time.sleep(1)
+
+    nodes.append(ChordNode(queues))
+    nodes.append(ChordNode(queues))
+    nodes.append(ChordNode(queues))
+    nodes.append(ChordNode(queues))
+
+    for i in range(1, len(nodes)):
+        nodes[i].start()
+        time.sleep(1)
+
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Chinchilla', file_data='Chinchilla'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Artichoke', file_data='Artichoke'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mozzerella', file_data='Mozzerella'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Spinnach', file_data='Spinnach'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Alfredo', file_data='Alfredo'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Komquat', file_data='Komquat'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Rosemary', file_data='Rosemary'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Shrimp', file_data='Shrimp'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Halibut', file_data='Halibut'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Corn', file_data='Corn'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Yams', file_data='Yams'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Horseraddish', file_data='Horseraddish'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Garlic', file_data='Garlic'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Cauliflower', file_data='Cauliflower'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Pasta', file_data='Pasta'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mushroom', file_data='Mushroom'))
+    time.sleep(0.25)
+
+    for n in nodes:
+        n.report()
+        time.sleep(1)
+
+    time.sleep(1)
+# TEST 0 END -----------------------
+
+# TEST 1: PARTITION PASSING DURING NODE JOIN---
+if TEST == 1:
+    nodes = []
+    nodes.append(ChordNode(queues))
+    nodes[0].start()
+
+    time.sleep(0.25)
+
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Chinchilla', file_data='Chinchilla'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Artichoke', file_data='Artichoke'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mozzerella', file_data='Mozzerella'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Spinnach', file_data='Spinnach'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Alfredo', file_data='Alfredo'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Komquat', file_data='Komquat'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Rosemary', file_data='Rosemary'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Shrimp', file_data='Shrimp'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Halibut', file_data='Halibut'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Corn', file_data='Corn'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Yams', file_data='Yams'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Horseraddish', file_data='Horseraddish'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Garlic', file_data='Garlic'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Cauliflower', file_data='Cauliflower'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Pasta', file_data='Pasta'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mushroom', file_data='Mushroom'))
+    time.sleep(0.25)
+
+    time.sleep(1)
+
+    # Add New Nodes now that there is data in the first node
+    new_nodes = []
+    for i in range(0,5):
+        new_nodes.append(ChordNode(queues))
+        # time.sleep(1)
+
+    for n in new_nodes:
+        n.start()
+        time.sleep(1)
+
+    print('FINAL VALUES')
+
+    nodes[0].report()
+    for n in new_nodes:
+        n.report()
+        time.sleep(0.25)
+
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Chinchilla'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Artichoke'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Mozzerella'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Spinnach'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Alfredo'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Komquat'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Rosemary'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Shrimp'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Halibut'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Corn'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Yams'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Horseraddish'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Garlic'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Cauliflower'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Pasta'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('GET_REQUEST', 'root', file_name='Mushroom'))
+    time.sleep(0.25)
 # TEST 1 END----------------------------------
 
 # TEST 2: NODE LEAVING NETWORK----------------
-# nodes = []
-# for i in range(0,6):
-#     nodes.append(ChordNode(queues))
-#
-# for n in nodes:
-#     n.start()
-#     time.sleep(0.25)
-#
-# queues[nodes[0].id].put(Message('SET', 'root', 'Chinchilla', 'Chinchilla'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Artichoke', 'Artichoke'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Mozzerella', 'Mozzerella'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Spinnach', 'Spinnach'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Alfredo', 'Alfredo'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Komquat', 'Komquat'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Rosemary', 'Rosemary'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Shrimp', 'Shrimp'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Halibut', 'Halibut'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Corn', 'Corn'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Yams', 'Yams'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Horseraddish', 'Horseraddish'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Garlic', 'Garlic'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Cauliflower', 'Cauliflower'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Pasta', 'Pasta'))
-# time.sleep(0.25)
-# queues[nodes[0].id].put(Message('SET', 'root', 'Mushroom', 'Mushroom'))
-# time.sleep(0.25)
-#
-# for n in nodes:
-#     n.report()
-#     time.sleep(0.25)
-#
-# print('---------------------------------------------------')
-# print('---------------SENDING LEAVE MESSAGE---------------')
-# print('---------------------------------------------------')
-#
-# queues[nodes[0].id].put(Message('LEAVE_NETWORK', 'root', None, None))
-# time.sleep(0.25)
-# queues[nodes[2].id].put(Message('LEAVE_NETWORK', 'root', None, None))
-# time.sleep(0.25)
-# queues[nodes[3].id].put(Message('LEAVE_NETWORK', 'root', None, None))
-# time.sleep(0.25)
-#
-# for n in nodes:
-#     n.report()
-#     time.sleep(0.25)
+if TEST == 2:
+    nodes = []
+    for i in range(0,6):
+        nodes.append(ChordNode(queues))
+
+    for n in nodes:
+        n.start()
+        time.sleep(0.25)
+
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Chinchilla', file_data='Chinchilla'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Artichoke', file_data='Artichoke'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mozzerella', file_data='Mozzerella'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Spinnach', file_data='Spinnach'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Alfredo', file_data='Alfredo'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Komquat', file_data='Komquat'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Rosemary', file_data='Rosemary'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Shrimp', file_data='Shrimp'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Halibut', file_data='Halibut'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Corn', file_data='Corn'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Yams', file_data='Yams'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Horseraddish', file_data='Horseraddish'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Garlic', file_data='Garlic'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Cauliflower', file_data='Cauliflower'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Pasta', file_data='Pasta'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mushroom', file_data='Mushroom'))
+    time.sleep(0.25)
+
+    for n in nodes:
+        n.report()
+        time.sleep(0.25)
+
+    print('---------------------------------------------------')
+    print('---------------SENDING LEAVE MESSAGEs--------------')
+    print('---------------------------------------------------')
+
+    queues[nodes[0].id].put(Message('LEAVE_NETWORK', 'root', None, None))
+    time.sleep(0.25)
+    queues[nodes[2].id].put(Message('LEAVE_NETWORK', 'root', None, None))
+    time.sleep(0.25)
+    queues[nodes[3].id].put(Message('LEAVE_NETWORK', 'root', None, None))
+    time.sleep(0.25)
+
+    for n in nodes:
+        n.report()
+        time.sleep(0.25)
 # TEST 2 END----------------------------------
 
 # TEST 3: NODE LEAVING NETWORK + RESPONSIVE FINGER FIXING------
-nodes = []
-for i in range(0,5):
-    nodes.append(ChordNode(queues))
+if TEST == 3:
+    nodes = []
+    for i in range(0,10):
+        nodes.append(ChordNode(queues))
 
-for n in nodes:
-    n.start()
+    for n in nodes:
+        n.start()
+        time.sleep(0.25)
+
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Chinchilla', file_data='Chinchilla'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Artichoke', file_data='Artichoke'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mozzerella', file_data='Mozzerella'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Spinnach', file_data='Spinnach'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Alfredo', file_data='Alfredo'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Komquat', file_data='Komquat'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Rosemary', file_data='Rosemary'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Shrimp', file_data='Shrimp'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Halibut', file_data='Halibut'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Corn', file_data='Corn'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Yams', file_data='Yams'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Horseraddish', file_data='Horseraddish'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Garlic', file_data='Garlic'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Cauliflower', file_data='Cauliflower'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Pasta', file_data='Pasta'))
+    time.sleep(0.25)
+    queues[nodes[0].id].put(Message('SET_REQUEST', 'root', file_name='Mushroom', file_data='Mushroom'))
     time.sleep(0.25)
 
-queues[nodes[0].id].put(Message('SET', 'root', 'Chinchilla', 'Chinchilla'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Artichoke', 'Artichoke'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Mozzerella', 'Mozzerella'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Spinnach', 'Spinnach'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Alfredo', 'Alfredo'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Komquat', 'Komquat'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Rosemary', 'Rosemary'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Shrimp', 'Shrimp'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Halibut', 'Halibut'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Corn', 'Corn'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Yams', 'Yams'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Horseraddish', 'Horseraddish'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Garlic', 'Garlic'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Cauliflower', 'Cauliflower'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Pasta', 'Pasta'))
-time.sleep(0.25)
-queues[nodes[0].id].put(Message('SET', 'root', 'Mushroom', 'Mushroom'))
-time.sleep(0.25)
+    for n in nodes:
+        n.report()
+        time.sleep(0.25)
 
-for n in nodes:
-    n.report()
+    print('---------------------------------------------------')
+    print('---------------SENDING LEAVE MESSAGE---------------')
+    print('---------------------------------------------------')
+
+    queues[nodes[0].id].put(Message('LEAVE_NETWORK', 'root', None, None))
+    time.sleep(0.25)
+    queues[nodes[2].id].put(Message('LEAVE_NETWORK', 'root', None, None))
+    time.sleep(0.25)
+    queues[nodes[4].id].put(Message('LEAVE_NETWORK', 'root', None, None))
+    time.sleep(0.25)
+    queues[nodes[6].id].put(Message('LEAVE_NETWORK', 'root', None, None))
     time.sleep(0.25)
 
-print('---------------------------------------------------')
-print('---------------SENDING LEAVE MESSAGE---------------')
-print('---------------------------------------------------')
 
-queues[nodes[0].id].put(Message('LEAVE_NETWORK', 'root', None, None))
-time.sleep(0.25)
+    for n in nodes:
+        n.report()
+        time.sleep(0.25)
 
-for n in nodes:
-    n.report()
+    queues[nodes[1].id].put(Message('GET_REQUEST', 'root', file_name='Chinchilla'))
+    time.sleep(0.25)
+    queues[nodes[3].id].put(Message('GET_REQUEST', 'root', file_name='Artichoke'))
+    time.sleep(0.25)
+    queues[nodes[5].id].put(Message('GET_REQUEST', 'root', file_name='Mozzerella'))
+    time.sleep(0.25)
+    queues[nodes[1].id].put(Message('GET_REQUEST', 'root', file_name='Spinnach'))
+    time.sleep(0.25)
+    queues[nodes[3].id].put(Message('GET_REQUEST', 'root', file_name='Alfredo'))
+    time.sleep(0.25)
+    queues[nodes[5].id].put(Message('GET_REQUEST', 'root', file_name='Komquat'))
+    time.sleep(0.25)
+    queues[nodes[1].id].put(Message('GET_REQUEST', 'root', file_name='Rosemary'))
+    time.sleep(0.25)
+    queues[nodes[3].id].put(Message('GET_REQUEST', 'root', file_name='Shrimp'))
+    time.sleep(0.25)
+    queues[nodes[5].id].put(Message('GET_REQUEST', 'root', file_name='Halibut'))
+    time.sleep(0.25)
+    queues[nodes[1].id].put(Message('GET_REQUEST', 'root', file_name='Corn'))
+    time.sleep(0.25)
+    queues[nodes[3].id].put(Message('GET_REQUEST', 'root', file_name='Yams'))
+    time.sleep(0.25)
+    queues[nodes[5].id].put(Message('GET_REQUEST', 'root', file_name='Horseraddish'))
+    time.sleep(0.25)
+    queues[nodes[1].id].put(Message('GET_REQUEST', 'root', file_name='Garlic'))
+    time.sleep(0.25)
+    queues[nodes[3].id].put(Message('GET_REQUEST', 'root', file_name='Cauliflower'))
+    time.sleep(0.25)
+    queues[nodes[5].id].put(Message('GET_REQUEST', 'root', file_name='Pasta'))
+    time.sleep(0.25)
+    queues[nodes[7].id].put(Message('GET_REQUEST', 'root', file_name='Mushroom'))
     time.sleep(0.25)
 
-queues[nodes[1].id].put(Message('SET', 'root', 'Curry', 'Curry'))
-time.sleep(0.25)
-queues[nodes[1].id].put(Message('SET', 'root', 'Milkshake', 'Milkshake'))
-time.sleep(0.25)
-
-for n in nodes:
-    n.report()
-    time.sleep(0.25)
-
+    for n in nodes:
+        n.report()
+        time.sleep(0.25)
 # TEST 3 END----------------------------------
 
 # TEST 4 FIXING FINGERS-----------------------
@@ -644,7 +776,7 @@ for n in nodes:
 # print('FIXING FINGERS')
 #
 # for n in nodes:
-#     # n.fix_all_fingers()
+#     # n.ask_for_fingers()
 #     queues[n.id].put(Message('FIX_FINGERS', None, 0, None, None))
 #     time.sleep(1)
 # #
